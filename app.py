@@ -227,14 +227,24 @@ def render_card_html(rs: str, hidden: bool=False) -> str:
     </div>
     '''
 
-def render_cards_html(suited_str: str, hide_second=False) -> str:
-    items = split_suited_list(suited_str)
-    html = []
-    for i, rs in enumerate(items):
-        html.append(render_card_html(rs, hidden=(hide_second and i == 1)))
-    if not html:
-        html.append('<div class="cardback"></div>')
-    return "".join(html)
+def render_card_html(rs: str, hidden: bool=False) -> str:
+    if hidden:
+        return '<div class="cardback"></div>'
+    # rs: "J♠" o "10♦"
+    # Extrae el rank (A, J, Q, K, 2-10) y el palo (♠ ♥ ♦ ♣)
+    # Nota: para 10, mantenemos dos caracteres.
+    # Toma todos los dígitos consecutivos del comienzo, si no hay, toma la primera letra.
+    rank = ""
+    for ch in rs:
+        if ch.isdigit(): rank += ch
+        else: break
+    if rank == "":
+        rank = rs[0]  # A, J, Q, K
+    suit = rs[len(rank):] or "♠"
+    color_class = "red" if suit in ["♥","♦"] else "black"
+    # *** UNA SOLA LÍNEA SIN NEWLINES NI INDENTACIÓN ***
+    return f'<div class="cardface {color_class}"><div class="corner tl">{rank}<span class="suit">{suit}</span></div><div class="corner br">{rank}<span class="suit">{suit}</span></div></div>'
+
 
 def safe_first_visible(values_str: str) -> str:
     items = [c.strip() for c in values_str.split(",") if c.strip()]
@@ -368,6 +378,4 @@ with right:
     st.write(f"**Última recomendación:** {st.session_state.last_rec.upper() if st.session_state.last_rec else '-'}")
 
 st.markdown('</div>', unsafe_allow_html=True)  # /controls
-st.markdown('</div>', unsafe_allow_html=True)  # /panel
 
-st.caption("UI con cartas estilizadas. El modelo sigue recibiendo sólo los valores (J, 10, A, etc.).")
