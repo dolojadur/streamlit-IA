@@ -3,123 +3,86 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+from io import BytesIO
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.base import BaseEstimator, TransformerMixin
-import random
 
-# --------------------------- CONFIG ---------------------------
-st.set_page_config(page_title="Blackjack ML", page_icon="🃏", layout="wide")
+# --- Configuración de página (antes de cualquier st.*) ---
+st.set_page_config(page_title="Blackjack ML – Jugar", page_icon="🃏", layout="wide")
 
-# Fuerza tema claro y elimina sidebar/toolbar
+# --- Estilos: tipografía Poppins + fondo claro + ocultar sidebar ---
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
-
-:root{
-  --bg:#f7f9fc;        /* fondo claro */
-  --felt:#0b8f3a;      /* paño */
-  --felt2:#087532;
-  --ink:#0f172a;       /* texto */
-}
-
-html, body, [class*="css"] { font-family:'Poppins', sans-serif !important; color:var(--ink); }
+html, body, [class*="css"]  { font-family: 'Poppins', sans-serif; }
+:root { --bg: #f6f7fb; }
+section.main > div { padding-top: 1.2rem; }
+.block-container { padding-top: 1rem; }
 .stApp { background: var(--bg); }
-section.main { background: var(--bg); padding-top: 10px; }
-
-[data-testid="stSidebar"], header, [data-testid="stToolbar"] { display:none !important; }
-
-.container { max-width: 980px; margin: 0 auto 40px; padding: 0 14px; }
-
-/* Título simple sin tarjetas blancas */
-.title {
-  font-size: 28px; font-weight: 700; margin: 10px 0 4px 0;
+[data-testid="stSidebar"] { display: none; }  /* oculta sidebar */
+h1, h2, h3 { letter-spacing: .2px; }
+.card {
+  background: #ffffff; border-radius: 16px; padding: 1.1rem 1.25rem;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.06);
 }
-.subtitle { color:#6b7280; margin-bottom: 18px; }
-
-/* Mesa verde centrada */
-.table-wrap{
-  background: radial-gradient(ellipse at center, var(--felt) 0%, var(--felt2) 100%);
-  border-radius: 22px;
-  padding: 28px 26px;
-  box-shadow: inset 0 10px 30px rgba(0,0,0,.28);
-}
-
-/* Filas y cartas */
-.row-label{ color:#e5e7eb; font-weight:600; letter-spacing:.4px; margin-bottom:8px; }
-.cards-row{ display:flex; gap:12px; align-items:center; min-height:92px; flex-wrap:wrap; }
-
-.card-face{
-  width:68px; height:96px; border-radius:12px; background:#fff;
-  box-shadow: 0 6px 14px rgba(0,0,0,.25);
-  display:flex; align-items:center; justify-content:center;
-  font-weight:700; font-size:22px; position:relative;
-}
-.card-face.red{ color:#d11a2a; }
-.card-face.black{ color:#111827; }
-
-.card-back{
-  width:68px; height:96px; border-radius:12px;
-  background: repeating-linear-gradient(45deg, #0ea5e9, #0ea5e9 10px, #0284c7 10px, #0284c7 20px);
-  border: 2px solid #e2e8f0;
-  box-shadow: 0 6px 14px rgba(0,0,0,.25);
-}
-
-.totals{ color:#e5e7eb; font-weight:600; margin-top:6px; }
-
-/* Controles en una sola línea */
-.controls { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
-.controls button[kind="secondary"] { background:#fff !important; }
-
-/* Botones bonitos */
-.btn {
-  border: 1px solid #e5e7eb; background:#fff; border-radius:12px; padding:10px 14px;
-  box-shadow: 0 6px 14px rgba(16,24,40,.08);
-}
-.btn:disabled{ opacity:.6; cursor:not-allowed; }
-.pill{ display:inline-block; border-radius:999px; background:#eef2ff; color:#3730a3; padding:4px 10px; font-size:12px; }
+.btn-row button { width: 100%; }
+.grid { display: grid; gap: 1rem; }
+.table { background: #0c5e2c; color: #fff; border-radius: 18px; padding: 18px; }
+.badge { background:#ffffff22; padding: 2px 8px; border-radius: 8px; margin-left: 8px; font-size: .9rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# --------------------------- HELPERS PIPELINE ---------------------------
+# ---------- Utilidades para encontrar columnas esperadas ----------
 def _find_column_transformer(pipe: Pipeline) -> ColumnTransformer | None:
-    if isinstance(pipe, ColumnTransformer): return pipe
+    if isinstance(pipe, ColumnTransformer):
+        return pipe
     if hasattr(pipe, "named_steps"):
         for _, step in pipe.named_steps.items():
-            if isinstance(step, ColumnTransformer): return step
+            if isinstance(step, ColumnTransformer):
+                return step
             if isinstance(step, Pipeline):
                 inner = _find_column_transformer(step)
-                if inner is not None: return inner
+                if inner is not None:
+                    return inner
     return None
 
 def expected_columns_from_ct(ct: ColumnTransformer) -> list[str]:
     cols = []
-    for _, _, cols_spec in getattr(ct, "transformers_", []):
-        if cols_spec in ("drop", None): continue
+    for name, trans, cols_spec in getattr(ct, "transformers_", []):
+        if cols_spec == "drop" or cols_spec is None:
+            continue
         if isinstance(cols_spec, (list, tuple)):
             cols.extend([c for c in cols_spec if isinstance(c, str)])
-    # únicos preservando orden
-    seen, out = set(), []
+    seen, unique_cols = set(), []
     for c in cols:
         if c not in seen:
-            seen.add(c); out.append(c)
-    return out
+            seen.add(c); unique_cols.append(c)
+    return unique_cols
 
 def ensure_expected_columns(df: pd.DataFrame, expected: list[str]) -> pd.DataFrame:
     df = df.copy()
     for col in expected:
         if col not in df.columns:
-            if col in ("player_cards","dealer_cards"): df[col] = ""
-            elif col in ("step","round_id","hand_number"): df[col] = 1
-            elif col == "game_id": df[col] = 0
-            elif col in ("bet_mode","strategy_used"): df[col] = ("flat" if col=="bet_mode" else "unknown")
-            else: df[col] = np.nan
+            if col in ("player_cards", "dealer_cards"):
+                df[col] = ""
+            elif col in ("step", "round_id", "hand_number"):
+                df[col] = 1
+            elif col in ("game_id",):
+                df[col] = 0
+            elif col in ("bet_mode", "strategy_used"):
+                df[col] = "unknown"
+            else:
+                df[col] = np.nan
     return df
 
+# ---------- Clases usadas en el pipeline (necesarias para deserializar joblib) ----------
+from sklearn.base import BaseEstimator, TransformerMixin
+
 class DropColumns(BaseEstimator, TransformerMixin):
-    def __init__(self, columns_to_drop=None): self.columns_to_drop = columns_to_drop or []
+    def __init__(self, columns_to_drop=None):
+        self.columns_to_drop = columns_to_drop or []
     def fit(self, X, y=None): return self
-    def transform(self, X): return X.drop(columns=self.columns_to_drop, errors="ignore")
+    def transform(self, X): return X.drop(columns=self.columns_to_drop)
 
 class BlackjackFeatureExtractor(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None): return self
@@ -127,27 +90,29 @@ class BlackjackFeatureExtractor(BaseEstimator, TransformerMixin):
         X_ = X.copy()
         def hand_value(cards):
             card_list = [c.strip().upper() for c in str(cards).split(",") if c.strip()]
-            vals, aces = [], 0
+            values = []
             for c in card_list:
-                if c in ["J","Q","K"]: vals.append(10)
-                elif c == "A": vals.append(11); aces += 1
+                if c in ["J","Q","K"]: values.append(10)
+                elif c == "A": values.append(11)
                 else:
-                    try: vals.append(int(c))
-                    except: vals.append(0)
-            total = sum(vals)
-            while total>21 and aces>0: total-=10; aces-=1
+                    try: values.append(int(c))
+                    except ValueError: values.append(0)
+            total = sum(values); aces = card_list.count("A")
+            while total > 21 and aces > 0:
+                total -= 10; aces -= 1
             return total
+        X_["player_total"] = X_["player_cards"].apply(hand_value)
+        X_["player_aces"]  = X_["player_cards"].apply(lambda s: str(s).upper().split(",").count("A"))
         def dealer_value(cards):
             first = str(cards).split(",")[0].strip().upper()
             if first in ["J","Q","K"]: return 10
-            if first=="A": return 11
+            if first == "A": return 11
             try: return int(first)
-            except: return 0
-        X_["player_total"] = X_["player_cards"].apply(hand_value)
-        X_["player_aces"]  = X_["player_cards"].apply(lambda s: str(s).upper().split(",").count("A"))
+            except ValueError: return 0
         X_["dealer_visible"] = X_["dealer_cards"].apply(dealer_value)
         return X_
 
+# ---------- Carga del modelo ----------
 @st.cache_resource
 def load_model():
     m = joblib.load("models/blackjack_action_model.joblib")
@@ -156,178 +121,154 @@ def load_model():
     return m, expected
 
 model, expected_cols = load_model()
-ACTIONS = ["hit","stand","double","split"]  # split no implementado
 
-# --------------------------- BLACKJACK CORE ---------------------------
+# ---------- Recomendación ----------
+ACTIONS = ["hit","stand","double","split"]
+
+def recommend_action(model, player_cards, dealer_cards, step=1, extra_cols=None):
+    row = {
+        "player_cards": player_cards, "dealer_cards": dealer_cards, "step": step,
+        "game_id": 1, "round_id": 1, "hand_number": 1, "bet_mode": "flat", "strategy_used": "unknown",
+    }
+    if extra_cols: row.update(extra_cols)
+    X = pd.DataFrame([row])
+    try:
+        if expected_cols: X = ensure_expected_columns(X, expected_cols)
+        return model.predict(X)[0]
+    except ValueError as e:
+        st.error("Faltan columnas para el pipeline. Ajustá ensure_expected_columns().")
+        st.code(str(e))
+        raise
+
+# ---------- Motor sencillo de Blackjack ----------
+import random
 RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"]
 SUITS = ["♠","♥","♦","♣"]
 
 def new_shoe(num_decks=4):
-    shoe=[]
+    shoe = []
     for _ in range(num_decks):
         for r in RANKS:
-            for s in SUITS: shoe.append((r,s))
+            for s in SUITS:
+                shoe.append((r,s))
     random.shuffle(shoe)
     return shoe
 
-def add_card_str(s, card):  # rank-only para el modelo
-    r = card[0]
-    return (s + ", " + r) if s.strip() else r
+def card_to_str(card_tuple): return card_tuple[0]
+def add_card(list_str, card_tuple):
+    s = card_to_str(card_tuple)
+    return (list_str + ", " + s) if list_str.strip() else s
 
-def hand_total(cards_str):
-    cards=[c.strip().upper() for c in cards_str.split(",") if c.strip()]
-    vals, aces = [], 0
+def hand_value(cards_str):
+    cards = [c.strip().upper() for c in cards_str.split(",") if c.strip()]
+    vals = []
     for c in cards:
         if c in ["J","Q","K"]: vals.append(10)
-        elif c=="A": vals.append(11); aces+=1
+        elif c == "A": vals.append(11)
         else:
             try: vals.append(int(c))
             except: vals.append(0)
-    total=sum(vals)
-    while total>21 and aces>0: total-=10; aces-=1
+    total = sum(vals); aces = cards.count("A")
+    while total > 21 and aces > 0:
+        total -= 10; aces -= 1
     return total
 
-def recommend_action(player_cards, dealer_cards, step=1, extra_cols=None):
-    row = {
-        "player_cards": player_cards, "dealer_cards": dealer_cards,
-        "step": step, "game_id":1, "round_id":1, "hand_number":1,
-        "bet_mode":"flat", "strategy_used":"unknown"
-    }
-    if extra_cols: row.update(extra_cols)
-    X = pd.DataFrame([row])
-    if expected_cols: X = ensure_expected_columns(X, expected_cols)
-    return model.predict(X)[0]
+# ---------- Estado ----------
+if "shoe" not in st.session_state: st.session_state.shoe = new_shoe(4)
+if "num_decks" not in st.session_state: st.session_state.num_decks = 4
+if "player_cards" not in st.session_state: st.session_state.player_cards = ""
+if "dealer_cards" not in st.session_state: st.session_state.dealer_cards = ""
+if "step" not in st.session_state: st.session_state.step = 1
+if "round_over" not in st.session_state: st.session_state.round_over = True
+if "last_rec" not in st.session_state: st.session_state.last_rec = "hit"
 
-# --------------------------- STATE ---------------------------
-def init_state():
-    ss = st.session_state
-    ss.setdefault("shoe", new_shoe())
-    ss.setdefault("player", [])        # lista de (rank,suit)
-    ss.setdefault("dealer", [])
-    ss.setdefault("player_str", "")
-    ss.setdefault("dealer_str", "")
-    ss.setdefault("step", 1)
-    ss.setdefault("round_over", True)
-    ss.setdefault("dealer_revealed", False)
-    ss.setdefault("last_rec", "hit")
-    ss.setdefault("history", [])       # para deshacer: lista de ("player"|"dealer", carta)
-init_state()
+# ---------- UI ----------
+st.markdown("<h1>🃏 Blackjack ML — Jugar contra el modelo</h1>", unsafe_allow_html=True)
+with st.container():
+    c_top = st.columns([1,1,2,2,2])
+    with c_top[0]:
+        st.number_input("N° de mazos", min_value=1, max_value=8, step=1,
+                        value=st.session_state.num_decks, key="num_decks")
+    with c_top[1]:
+        if st.button("🂠 Repartir nueva mano"):
+            st.session_state.shoe = new_shoe(st.session_state.num_decks)
+            st.session_state.player_cards = ""
+            st.session_state.dealer_cards = ""
+            st.session_state.step = 1
+            st.session_state.round_over = False
+            for _ in range(2):
+                st.session_state.player_cards = add_card(st.session_state.player_cards, st.session_state.shoe.pop())
+                st.session_state.dealer_cards = add_card(st.session_state.dealer_cards, st.session_state.shoe.pop())
 
-# --------------------------- RENDER ---------------------------
-def suit_color(s): return "red" if s in ["♥","♦"] else "black"
-def render_card(rank, suit, hidden=False):
-    if hidden:
-        return '<div class="card-back"></div>'
-    return f'<div class="card-face {"red" if suit_color(suit)=="red" else "black"}">{rank}{suit}</div>'
+# Mesa simple (foco en “jugar”)
+st.markdown('<div class="table">', unsafe_allow_html=True)
+st.markdown("### Dealer <span class='badge'>(segundo naipe oculto hasta plantarse)</span>", unsafe_allow_html=True)
+if st.session_state.dealer_cards:
+    dealer_show = st.session_state.dealer_cards.split(",")[0]
+    st.write(f"**Visible:** {dealer_show}")
+else:
+    st.write("—")
 
-def render_hand(hand, hide_second=False):
-    html=[]
-    for i,(r,s) in enumerate(hand):
-        html.append(render_card(r,s, hidden=(hide_second and i==1)))
-    return "".join(html) if html else '<span class="pill">Sin cartas</span>'
+st.markdown("---")
+st.markdown("### Jugador")
+if st.session_state.player_cards:
+    st.write(f"Cartas: {st.session_state.player_cards}  |  **Total**: {hand_value(st.session_state.player_cards)}")
+else:
+    st.write("—")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# --------------------------- FLOW ---------------------------
-def deal_new_hand():
-    ss=st.session_state
-    ss.shoe = new_shoe()
-    ss.player, ss.dealer = [], []
-    ss.player_str = ""; ss.dealer_str=""
-    ss.step = 1; ss.round_over = False; ss.dealer_revealed=False; ss.history=[]
-    for _ in range(2):
-        cp = ss.shoe.pop(); ss.player.append(cp); ss.player_str = add_card_str(ss.player_str, cp); ss.history.append(("player", cp))
-        cd = ss.shoe.pop(); ss.dealer.append(cd); ss.dealer_str = add_card_str(ss.dealer_str, cd); ss.history.append(("dealer", cd))
+# Controles de juego
+colA, colB, colC, colD = st.columns([1,1,2,2])
+with colA:
+    if st.button("🤖 Recomendar"):
+        if not st.session_state.round_over:
+            rec = recommend_action(model, st.session_state.player_cards, st.session_state.dealer_cards, step=st.session_state.step)
+            st.session_state.last_rec = rec
+            st.toast(f"Modelo sugiere: {rec.upper()}")
+        else:
+            st.info("Repartí una mano para consultar al modelo.")
 
-def player_hit(double=False):
-    ss=st.session_state
-    c = ss.shoe.pop()
-    ss.player.append(c); ss.player_str = add_card_str(ss.player_str, c); ss.history.append(("player", c))
-    ss.step += 1
-    if hand_total(ss.player_str) > 21:
-        ss.dealer_revealed=True; ss.round_over=True
-        st.toast("¡Te pasaste! Pierdes la mano.", icon="❌")
+with colB:
+    accion = st.selectbox("Acción a aplicar", ACTIONS, index=ACTIONS.index(st.session_state.last_rec))
 
-def undo_last_hit():
-    ss=st.session_state
-    # quita la última carta del jugador si la ronda no terminó y hubo hit
-    if ss.round_over or not ss.history: return
-    # buscar la última carta del jugador en la historia
-    while ss.history:
-        who, card = ss.history.pop()
-        if who == "player" and len(ss.player) > 2:  # no permitimos deshacer debajo de 2 cartas iniciales
-            ss.player.pop()
-            # reconstruir player_str
-            s = ""
-            for r,suit in ss.player: s = add_card_str(s, (r,suit))
-            ss.player_str = s
-            ss.step = max(1, ss.step-1)
-            break
+with colC:
+    if st.button("Aplicar acción"):
+        if st.session_state.round_over:
+            st.info("Primero repartí una mano."); st.stop()
+        if accion in ("hit","double"):
+            st.session_state.player_cards = add_card(st.session_state.player_cards, st.session_state.shoe.pop())
+            st.session_state.step += 1
+            if hand_value(st.session_state.player_cards) > 21:
+                st.error("¡Te pasaste! Pierdes la mano.")
+                st.session_state.round_over = True
+        elif accion == "stand":
+            # Juega el dealer hasta 17+
+            def dealer_total(s): return hand_value(s)
+            while dealer_total(st.session_state.dealer_cards) < 17 and len(st.session_state.shoe) > 0:
+                st.session_state.dealer_cards = add_card(st.session_state.dealer_cards, st.session_state.shoe.pop())
+            p = hand_value(st.session_state.player_cards)
+            d = hand_value(st.session_state.dealer_cards)
+            st.write(f"Dealer: {st.session_state.dealer_cards} (total {d})")
+            if d > 21 or p > d: st.success("¡Ganaste!")
+            elif p < d:        st.error("Perdiste 😢")
+            else:              st.info("Empate (push).")
+            st.session_state.round_over = True
+        elif accion == "split":
+            st.info("Split no implementado en esta demo.")
 
-def dealer_play_to_17():
-    ss=st.session_state
-    ss.dealer_revealed=True
-    def total_from_list(cards):
-        s=""; 
-        for c in cards: s = add_card_str(s, c)
-        return hand_total(s)
-    while total_from_list(ss.dealer) < 17 and ss.shoe:
-        c = ss.shoe.pop()
-        ss.dealer.append(c); ss.dealer_str = add_card_str(ss.dealer_str, c); ss.history.append(("dealer", c))
-    p = hand_total(ss.player_str); d = hand_total(ss.dealer_str)
-    if d>21 or p>d: st.toast("¡Ganaste!", icon="✅")
-    elif p<d:       st.toast("Perdiste 😢", icon="⚠️")
-    else:           st.toast("Empate (push).", icon="🔁")
-    ss.round_over=True
+with colD:
+    if st.button("🔄 Nueva mano"):
+        st.session_state.round_over = True
+        st.session_state.player_cards = ""
+        st.session_state.dealer_cards = ""
+        st.session_state.step = 1
 
-# --------------------------- UI ---------------------------
-st.markdown('<div class="container">', unsafe_allow_html=True)
-st.markdown('<div class="title">🃏 Blackjack ML</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Jugar con asistencia del modelo</div>', unsafe_allow_html=True)
-
-# Mesa
-st.markdown('<div class="table-wrap">', unsafe_allow_html=True)
-
-# Dealer
-dealer_total_display = "?" if (not st.session_state.dealer_revealed and st.session_state.dealer) else (
-    hand_total(st.session_state.dealer_str) if st.session_state.dealer else "-"
-)
-st.markdown('<div class="row-label">DEALER</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="cards-row">{render_hand(st.session_state.dealer, hide_second=not st.session_state.dealer_revealed)}</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="totals">Total: {dealer_total_display}</div>', unsafe_allow_html=True)
-
-# Separador pequeño
-st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-
-# Player
-player_total = hand_total(st.session_state.player_str) if st.session_state.player else "-"
-st.markdown('<div class="row-label">JUGADOR</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="cards-row">{render_hand(st.session_state.player)}</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="totals">Total: {player_total}</div>', unsafe_allow_html=True)
-
-st.markdown('</div>', unsafe_allow_html=True)  # /table-wrap
-
-# Controles
-st.markdown('<div class="controls">', unsafe_allow_html=True)
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-with c1:
-    st.button("🂠 Repartir", key="deal", on_click=deal_new_hand, disabled=not st.session_state.round_over)
-with c2:
-    disabled = st.session_state.round_over or not st.session_state.player
-    if st.button("🤖 Recomendar", disabled=disabled):
-        rec = recommend_action(st.session_state.player_str, st.session_state.dealer_str, step=st.session_state.step)
-        st.session_state.last_rec = rec
-        st.toast(f"Modelo: {rec.upper()}", icon="🧠")
-with c3:
-    st.button("➕ Hit", on_click=player_hit, disabled=disabled)
-with c4:
-    st.button("✋ Stand", on_click=dealer_play_to_17, disabled=disabled)
-with c5:
-    st.button("×2 Double", on_click=lambda: (player_hit(True), None) if not st.session_state.round_over else None,
-              disabled=(st.session_state.round_over or not st.session_state.player or st.session_state.step!=1))
-with c6:
-    st.button("↩ Deshacer", on_click=undo_last_hit,
-              disabled=(st.session_state.round_over or len(st.session_state.player)<=2))
-
-st.markdown(f'<div class="pill">Paso: {st.session_state.step} • Recomendación: {st.session_state.last_rec.upper()}</div>', unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)  # /controls
-st.markdown('</div>', unsafe_allow_html=True)  # /container
+# Panel de estado
+st.markdown('<div class="card">', unsafe_allow_html=True)
+c1, c2, c3 = st.columns(3)
+c1.metric("Paso", st.session_state.step)
+c2.write(f"**Jugador:** {st.session_state.player_cards or '-'}")
+c3.write(f"**Dealer:** {st.session_state.dealer_cards or '-'}")
+if st.session_state.last_rec:
+    st.caption(f"Última recomendación del modelo: **{st.session_state.last_rec.upper()}**")
+st.markdown('</div>', unsafe_allow_html=True)
