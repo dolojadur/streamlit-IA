@@ -277,16 +277,24 @@ with top_col2:
         st.session_state.dealer_cards_suited = ""
         st.session_state.step = 1
         st.session_state.round_over = True
-
-st.markdown('<div class="panel">', unsafe_allow_html=True)
+# st.markdown('<div class="panel">', unsafe_allow_html=True)
+st.write("")  # mantiene espaciado mínimo sin meter input raro
 st.subheader("🎮 Simulador de mano")
 
 # Filas: Dealer / Jugador (sin paño)
 dealer_html = render_cards_html(st.session_state.dealer_cards_suited, hide_second=not st.session_state.round_over)
 player_html = render_cards_html(st.session_state.player_cards_suited)
 
-st.markdown(f'<div class="row"><div class="label">Dealer</div><div class="cards">{dealer_html}</div></div>', unsafe_allow_html=True)
-st.markdown(f'<div class="row"><div class="label">Jugador</div><div class="cards">{player_html}</div></div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="row"><div class="label">Dealer</div><div class="cards">{dealer_html}</div></div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    f'<div class="row"><div class="label">Jugador</div><div class="cards">{player_html}</div></div>',
+    unsafe_allow_html=True
+)
+
 
 st.markdown('<div class="controls">', unsafe_allow_html=True)
 left, right = st.columns([1.25, 0.75])
