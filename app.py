@@ -4,6 +4,70 @@ import pandas as pd
 import numpy as np
 import joblib
 from io import BytesIO
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+
+def _find_column_transformer(pipe: Pipeline) -> ColumnTransformer | None:
+    """
+    Busca un ColumnTransformer dentro de un Pipeline (en cualquier step).
+    Devuelve el primero que encuentre o None si no hay.
+    """
+    if isinstance(pipe, ColumnTransformer):
+        return pipe
+    if hasattr(pipe, "named_steps"):
+        for _, step in pipe.named_steps.items():
+            # Puede estar directo o anidado
+            if isinstance(step, ColumnTransformer):
+                return step
+            if isinstance(step, Pipeline):
+                inner = _find_column_transformer(step)
+                if inner is not None:
+                    return inner
+    return None
+
+def expected_columns_from_ct(ct: ColumnTransformer) -> list[str]:
+    """
+    Extrae los nombres de columnas (strings) que el ColumnTransformer usó al fit.
+    Ignora transformadores 'drop' y los que usan índices/seleccionadores no-string.
+    """
+    cols = []
+    for name, trans, cols_spec in getattr(ct, "transformers_", []):
+        if cols_spec == "drop" or cols_spec is None:
+            continue
+        # Cuando se entrenó con nombres de columnas (strings), aquí quedan guardadas
+        if isinstance(cols_spec, (list, tuple)):
+            # Filtrar a solo strings (a veces aparecen índices)
+            cols.extend([c for c in cols_spec if isinstance(c, str)])
+    # Quitar duplicados preservando orden
+    seen = set()
+    unique_cols = []
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            unique_cols.append(c)
+    return unique_cols
+
+def ensure_expected_columns(df: pd.DataFrame, expected: list[str]) -> pd.DataFrame:
+    """
+    Agrega al DataFrame toda columna faltante. Intenta poner defaults sensatos si
+    coincide con nombres típicos; caso contrario, NaN.
+    """
+    df = df.copy()
+    for col in expected:
+        if col not in df.columns:
+            # Defaults “inteligentes” para tu caso de Blackjack (ajustá si te conviene)
+            if col in ("player_cards", "dealer_cards"):
+                df[col] = ""
+            elif col in ("step", "round_id", "hand_number"):
+                df[col] = 1
+            elif col in ("game_id",):
+                df[col] = 0
+            elif col in ("bet_mode", "strategy_used"):
+                df[col] = "unknown"
+            else:
+                # Desconocida -> NaN
+                df[col] = np.nan
+    return df
 
 # ---------- Tipografía Poppins vía CSS ----------
 st.markdown("""
@@ -74,26 +138,28 @@ class BlackjackFeatureExtractor(BaseEstimator, TransformerMixin):
 # ---------- Carga del modelo ----------
 @st.cache_resource
 def load_model():
-    return joblib.load("models/blackjack_action_model.joblib")
+    m = joblib.load("models/blackjack_action_model.joblib")
+    # Intentamos descubrir columnas esperadas
+    ct = _find_column_transformer(m)
+    expected = expected_columns_from_ct(ct) if ct is not None else []
+    return m, expected
 
-model = load_model()
+model, expected_cols = load_model()
+
 
 # ---------- Utils ----------
 ACTIONS = ["hit","stand","double","split"]
 
 def recommend_action(model, player_cards, dealer_cards, step=1, extra_cols=None):
     """
-    Construye un mini DataFrame con las columnas mínimas esperadas por tu pipeline:
-      - 'player_cards'  (str CSV, ej: "A, 6")
-      - 'dealer_cards'  (str CSV, ej: "K, 8")  -> tu extractor mira la primera
-      - 'step'
-      - + columnas que luego DropColumns eliminará (si faltan, igual no molesta)
+    Arma un DF con las columnas mínimas, lo completa con las esperadas por el
+    ColumnTransformer (si faltan), y predice.
     """
     row = {
         "player_cards": player_cards,
         "dealer_cards": dealer_cards,
         "step": step,
-        # columnas que suelen estar pero DropColumns tirará:
+        # columnas comunes en tu dataset; si el DropColumns las quita, no pasa nada
         "game_id": 1,
         "round_id": 1,
         "hand_number": 1,
@@ -104,8 +170,19 @@ def recommend_action(model, player_cards, dealer_cards, step=1, extra_cols=None)
         row.update(extra_cols)
 
     X = pd.DataFrame([row])
-    pred = model.predict(X)[0]
-    return pred
+
+    # Agregar columnas faltantes que el ColumnTransformer necesita
+    try:
+        # expected_cols viene del cache al cargar el modelo
+        if expected_cols:
+            X = ensure_expected_columns(X, expected_cols)
+        pred = model.predict(X)[0]
+        return pred
+    except ValueError as e:
+        # Si el ColumnTransformer igual se queja de “columns are missing”, lo mostramos claro
+        st.error("Faltan columnas para el pipeline. Revisá el mensaje y agregá defaults en ensure_expected_columns().")
+        st.code(str(e))
+        raise
 
 # Sencillo motor de Blackjack para la pestaña "Jugar"
 import random
