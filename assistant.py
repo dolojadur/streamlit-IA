@@ -2,7 +2,15 @@
 from typing import Any, Dict, List, Tuple, Optional
 import re
 
-from langchain_ollama import OllamaLLM
+# Intentar importar el adaptador de Ollama para LangChain. Si no está disponible,
+# no queremos que la importación rompa toda la app: manejaremos el caso más
+# abajo y mostraremos un mensaje instructivo al usuario.
+try:
+    from langchain_ollama import OllamaLLM
+    _HAS_OLLAMA = True
+except Exception:
+    OllamaLLM = None
+    _HAS_OLLAMA = False
 from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
 from langchain_core.prompts import PromptTemplate
 
@@ -22,7 +30,15 @@ graph = Neo4jGraph(
 )
 
 # ---------- LLM ----------
-llm = OllamaLLM(model=LLM_NAME)
+if _HAS_OLLAMA:
+    try:
+        llm = OllamaLLM(model=LLM_NAME)
+    except Exception:
+        # Si la importación existía pero la inicialización falla, marcamos como no disponible
+        llm = None
+        _HAS_OLLAMA = False
+else:
+    llm = None
 
 # ---------- Prompt seguro (solo {question}) ----------
 CYPHER_SYSTEM_HINT = CYPHER_SYSTEM_HINT = """
@@ -64,15 +80,22 @@ Pregunta: {question}
 cypher_prompt = PromptTemplate.from_template(CYPHER_SYSTEM_HINT)
 
 # --- Cadena QA sobre grafo (con intermediate steps) ---
-chain = GraphCypherQAChain.from_llm(
-    llm=llm,
-    graph=graph,
-    verbose=True,
-    cypher_prompt=cypher_prompt,
-    return_intermediate_steps=True,
-    allow_dangerous_requests=True,
-    # validate_cypher=True,  # opcional
-)
+if _HAS_OLLAMA and llm is not None:
+    chain = GraphCypherQAChain.from_llm(
+        llm=llm,
+        graph=graph,
+        verbose=True,
+        cypher_prompt=cypher_prompt,
+        return_intermediate_steps=True,
+        allow_dangerous_requests=True,
+        # validate_cypher=True,  # opcional
+    )
+else:
+    # Si no hay Ollama disponible, evitamos crear el chain en el import time y
+    # devolvemos mensajes informativos en runtime para que la app no muera con
+    # ModuleNotFoundError al importar el módulo.
+    chain = None
+
 
 def _normalize_query_text(q: str) -> str:
     ql = q.lower()
@@ -253,6 +276,9 @@ def _extract_steps(data: Dict[str, Any]) -> Tuple[str | None, Any]:
 
 def _llm_generate_cypher(question: str) -> str:
     """Llama directamente al generador de Cypher del chain como fallback."""
+    if chain is None:
+        # No se puede generar cypher porque no existe el chain (falta Ollama/langchain_ollama)
+        return "-- ERROR: El generador de Cypher no está disponible porque falta la integración con Ollama. Instalá la dependencia 'langchain_ollama' o la integración correspondiente y reiniciá la app."
     raw = chain.cypher_generation_chain.invoke({"question": question, "query": question})
     text = raw.get("text") if isinstance(raw, dict) and "text" in raw else str(raw)
     return _sanitize_cypher(text, question)
@@ -345,6 +371,19 @@ def _format_answer_from_rows(rows: List[Dict[str, Any]]) -> str:
 
 def answer(question: str) -> Tuple[str, str]:
     """Devuelve (cypher_usado, respuesta)"""
+    # 1) Si el chain no fue creado (p. ej. falta langchain_ollama / Ollama), devolvemos
+    # un mensaje instructivo en vez de lanzar un ModuleNotFoundError.
+    if chain is None:
+        msg = (
+            "La integración con Ollama no está disponible en este entorno.\n"
+            "Instalá las dependencias necesarias y reiniciá la app. Comandos sugeridos:\n\n"
+            "# Entorno local (PowerShell)\n"
+            "pip install langchain-ollama ollama langchain streamlit\n\n"
+            "# Si desplegás en Streamlit Cloud, añadí un requirements.txt con esas dependencias.\n\n"
+            "Una vez instaladas, reiniciá la app para que la integración esté activa."
+        )
+        return "", msg
+
     # 1) Intento con el chain completo
     try:
         user_q = _normalize_query_text(question)

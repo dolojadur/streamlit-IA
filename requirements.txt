@@ -1,0 +1,11 @@
+# Requisitos para el proyecto streamlit-IA
+# Instalar con: pip install -r requirements.txt
+
+streamlit
+langchain
+ollama
+langchain-ollama
+langchain-neo4j
+neo4j
+# Opcional: si usás .env para configuraciones
+python-dotenv
