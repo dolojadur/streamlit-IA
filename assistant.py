@@ -1,6 +1,7 @@
 # assistant.py — LangChain 1.0.x + Neo4j + Ollama (REPL interactivo + sanitizado)
 from typing import Any, Dict, List, Tuple, Optional
 import re
+import os
 
 # Intentar importar el adaptador de Ollama para LangChain. Si no está disponible,
 # no queremos que la importación rompa toda la app: manejaremos el caso más
@@ -14,20 +15,44 @@ except Exception:
 from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
 from langchain_core.prompts import PromptTemplate
 
-# --- Config directa ---
-NEO4J_URL = "neo4j+s://c63dbf3f.databases.neo4j.io"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "jRcnixjwaho44020Iic2ZK9D2jZXc1hOsrzRCDteJBA"  
-NEO4J_DATABASE = "neo4j"
-LLM_NAME = "gemma3:4b"                 
+# --- Config: preferir Streamlit secrets > variables de entorno > valores por defecto ---
+try:
+    # Intentamos leer secrets de Streamlit si el módulo está disponible en runtime
+    import streamlit as _st_module
+    _SECRETS = getattr(_st_module, "secrets", None)
+except Exception:
+    _st_module = None
+    _SECRETS = None
+
+def _get_secret(key: str, default: str = "") -> str:
+    # Preferir st.secrets, luego env vars, luego fallback
+    if _SECRETS and key in _SECRETS:
+        return str(_SECRETS[key])
+    return os.environ.get(key, default)
+
+# Valores por defecto (mantengo los tuyos como fallback local, pero en despliegue
+# se deben usar secrets o variables de entorno)
+NEO4J_URL = _get_secret("NEO4J_URL", "neo4j+s://c63dbf3f.databases.neo4j.io")
+NEO4J_USER = _get_secret("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = _get_secret("NEO4J_PASSWORD", "jRcnixjwaho44020Iic2ZK9D2jZXc1hOsrzRCDteJBA")
+NEO4J_DATABASE = _get_secret("NEO4J_DATABASE", "neo4j")
+LLM_NAME = _get_secret("LLM_NAME", "gemma3:4b")
 
 # ---------- Conectar al grafo ----------
-graph = Neo4jGraph(
-    url=NEO4J_URL,
-    username=NEO4J_USER,
-    password=NEO4J_PASSWORD,
-    database=NEO4J_DATABASE,
-)
+# Intentamos instanciar la conexión al grafo pero no queremos que una
+# excepción en tiempo de import (por ejemplo Connection refused) rompa la
+# carga del módulo en Streamlit. Guardamos el error para mostrarlo en runtime.
+GRAPH_INIT_ERROR: str | None = None
+try:
+    graph = Neo4jGraph(
+        url=NEO4J_URL,
+        username=NEO4J_USER,
+        password=NEO4J_PASSWORD,
+        database=NEO4J_DATABASE,
+    )
+except Exception as e:
+    graph = None
+    GRAPH_INIT_ERROR = str(e)
 
 # ---------- LLM ----------
 if _HAS_OLLAMA:
@@ -80,7 +105,7 @@ Pregunta: {question}
 cypher_prompt = PromptTemplate.from_template(CYPHER_SYSTEM_HINT)
 
 # --- Cadena QA sobre grafo (con intermediate steps) ---
-if _HAS_OLLAMA and llm is not None:
+if _HAS_OLLAMA and llm is not None and graph is not None:
     chain = GraphCypherQAChain.from_llm(
         llm=llm,
         graph=graph,
@@ -381,6 +406,19 @@ def answer(question: str) -> Tuple[str, str]:
             "pip install langchain-ollama ollama langchain streamlit\n\n"
             "# Si desplegás en Streamlit Cloud, añadí un requirements.txt con esas dependencias.\n\n"
             "Una vez instaladas, reiniciá la app para que la integración esté activa."
+        )
+        return "", msg
+
+    # Si la inicialización del grafo falló en el import, devolvemos mensaje claro
+    if graph is None and GRAPH_INIT_ERROR is not None:
+        msg = (
+            "No se pudo conectar al servidor de Neo4j en el arranque de la app.\n"
+            f"Error detectado: {GRAPH_INIT_ERROR}\n\n"
+            "Comprobá lo siguiente:\n"
+            "- Que la URL y credenciales de Neo4j (NEO4J_URL/NEO4J_USER/NEO4J_PASSWORD) estén correctas y se definan como secrets en Streamlit Cloud.\n"
+            "- Que el servicio Neo4j permita conexiones desde el host donde corre la app (firewall / reglas de red).\n"
+            "- Que estéis usando el esquema correcto (ej. 'neo4j+s://' para conexiones TCP+TLS a Aura).\n"
+            "Si querés, puedo ayudarte a validar esos valores o a cambiar la app para usar variables de entorno/Streamlit secrets."
         )
         return "", msg
 
