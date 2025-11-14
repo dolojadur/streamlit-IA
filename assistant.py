@@ -1,17 +1,28 @@
 # assistant.py — LangChain 1.0.x + Neo4j + Ollama (REPL interactivo + sanitizado)
 from typing import Any, Dict, List, Tuple, Optional
 import re
+import os
 
 from langchain_ollama import OllamaLLM
 from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
 from langchain_core.prompts import PromptTemplate
 
-# --- Config directa ---
-NEO4J_URL = "neo4j+s://c63dbf3f.databases.neo4j.io"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "jRcnixjwaho44020Iic2ZK9D2jZXc1hOsrzRCDteJBA"  
-NEO4J_DATABASE = "neo4j"
-LLM_NAME = "gemma3:4b"                 
+# --- Config from environment or streamlit secrets ---
+# Try to import streamlit to read from secrets if available
+try:
+    import streamlit as st
+    NEO4J_URL = st.secrets.get("NEO4J_URL", os.environ.get("NEO4J_URL", "neo4j+s://c63dbf3f.databases.neo4j.io"))
+    NEO4J_USER = st.secrets.get("NEO4J_USER", os.environ.get("NEO4J_USER", "neo4j"))
+    NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", os.environ.get("NEO4J_PASSWORD", ""))
+    NEO4J_DATABASE = st.secrets.get("NEO4J_DATABASE", os.environ.get("NEO4J_DATABASE", "neo4j"))
+    LLM_NAME = st.secrets.get("LLM_NAME", os.environ.get("LLM_NAME", "gemma3:4b"))
+except (ImportError, FileNotFoundError, AttributeError):
+    # Fallback to environment variables if streamlit is not available or secrets not configured
+    NEO4J_URL = os.environ.get("NEO4J_URL", "neo4j+s://c63dbf3f.databases.neo4j.io")
+    NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
+    NEO4J_DATABASE = os.environ.get("NEO4J_DATABASE", "neo4j")
+    LLM_NAME = os.environ.get("LLM_NAME", "gemma3:4b")                 
 
 # ---------- Conectar al grafo ----------
 graph = Neo4jGraph(
@@ -25,7 +36,7 @@ graph = Neo4jGraph(
 llm = OllamaLLM(model=LLM_NAME)
 
 # ---------- Prompt seguro (solo {question}) ----------
-CYPHER_SYSTEM_HINT = CYPHER_SYSTEM_HINT = """
+CYPHER_SYSTEM_HINT = """
 Eres un generador de Cypher para un grafo médico preventivo en español.
 
 Usa exclusivamente estas etiquetas y relaciones:
@@ -120,15 +131,6 @@ def _sanitize_cypher(cypher: str, question: str = "") -> str:
     """Corrige errores típicos del LLM y adapta casos frecuentes."""
     if not cypher:
         return cypher
-
-    def _strip_code_fences(txt: str) -> str:
-        txt = txt.strip()
-        if txt.startswith("```") and txt.endswith("```"):
-            txt = txt[3:-3].strip()
-        if txt.lower().startswith("cypher"):
-            parts = txt.split("\n", 1)
-            txt = parts[1].strip() if len(parts) == 2 else ""
-        return txt
 
     fixed = _strip_code_fences(cypher)
 
