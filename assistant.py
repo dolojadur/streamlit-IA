@@ -1,69 +1,28 @@
 # assistant.py — LangChain 1.0.x + Neo4j + Ollama (REPL interactivo + sanitizado)
 from typing import Any, Dict, List, Tuple, Optional
 import re
-import os
 
-# Intentar importar el adaptador de Ollama para LangChain. Si no está disponible,
-# no queremos que la importación rompa toda la app: manejaremos el caso más
-# abajo y mostraremos un mensaje instructivo al usuario.
-try:
-    from langchain_ollama import OllamaLLM
-    _HAS_OLLAMA = True
-except Exception:
-    OllamaLLM = None
-    _HAS_OLLAMA = False
+from langchain_ollama import OllamaLLM
 from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
 from langchain_core.prompts import PromptTemplate
 
-# --- Config: preferir Streamlit secrets > variables de entorno > valores por defecto ---
-try:
-    # Intentamos leer secrets de Streamlit si el módulo está disponible en runtime
-    import streamlit as _st_module
-    _SECRETS = getattr(_st_module, "secrets", None)
-except Exception:
-    _st_module = None
-    _SECRETS = None
-
-def _get_secret(key: str, default: str = "") -> str:
-    # Preferir st.secrets, luego env vars, luego fallback
-    if _SECRETS and key in _SECRETS:
-        return str(_SECRETS[key])
-    return os.environ.get(key, default)
-
-# Valores por defecto (mantengo los tuyos como fallback local, pero en despliegue
-# se deben usar secrets o variables de entorno)
-NEO4J_URL = _get_secret("NEO4J_URL", "neo4j+s://c63dbf3f.databases.neo4j.io")
-NEO4J_USER = _get_secret("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = _get_secret("NEO4J_PASSWORD", "jRcnixjwaho44020Iic2ZK9D2jZXc1hOsrzRCDteJBA")
-NEO4J_DATABASE = _get_secret("NEO4J_DATABASE", "neo4j")
-LLM_NAME = _get_secret("LLM_NAME", "gemma3:4b")
+# --- Config directa ---
+NEO4J_URL = "neo4j+s://c63dbf3f.databases.neo4j.io"
+NEO4J_USER = "neo4j"
+NEO4J_PASSWORD = "jRcnixjwaho44020Iic2ZK9D2jZXc1hOsrzRCDteJBA"  
+NEO4J_DATABASE = "neo4j"
+LLM_NAME = "gemma3:4b"                 
 
 # ---------- Conectar al grafo ----------
-# Intentamos instanciar la conexión al grafo pero no queremos que una
-# excepción en tiempo de import (por ejemplo Connection refused) rompa la
-# carga del módulo en Streamlit. Guardamos el error para mostrarlo en runtime.
-GRAPH_INIT_ERROR: str | None = None
-try:
-    graph = Neo4jGraph(
-        url=NEO4J_URL,
-        username=NEO4J_USER,
-        password=NEO4J_PASSWORD,
-        database=NEO4J_DATABASE,
-    )
-except Exception as e:
-    graph = None
-    GRAPH_INIT_ERROR = str(e)
+graph = Neo4jGraph(
+    url=NEO4J_URL,
+    username=NEO4J_USER,
+    password=NEO4J_PASSWORD,
+    database=NEO4J_DATABASE,
+)
 
 # ---------- LLM ----------
-if _HAS_OLLAMA:
-    try:
-        llm = OllamaLLM(model=LLM_NAME)
-    except Exception:
-        # Si la importación existía pero la inicialización falla, marcamos como no disponible
-        llm = None
-        _HAS_OLLAMA = False
-else:
-    llm = None
+llm = OllamaLLM(model=LLM_NAME)
 
 # ---------- Prompt seguro (solo {question}) ----------
 CYPHER_SYSTEM_HINT = CYPHER_SYSTEM_HINT = """
@@ -98,6 +57,11 @@ Ejemplos:
      AND toLower(s2.nombre) IN ['congestion nasal','congestión nasal','rinorrea']
    RETURN DISTINCT e.nombre AS enfermedad
 
+Si la pregunta del usuario menciona SOLO un síntoma (por ejemplo, solo fiebre), 
+preferí consultas simples con (Sintoma)-[:INDICA_POTENCIALMENTE]->(Enfermedad).
+Usá reglas (nodo Regla) solamente cuando se mencionen 2 o más síntomas simultáneos.
+
+
 Devolvé SOLO el Cypher correcto que responde a:
 Pregunta: {question}
 """.strip()
@@ -105,22 +69,15 @@ Pregunta: {question}
 cypher_prompt = PromptTemplate.from_template(CYPHER_SYSTEM_HINT)
 
 # --- Cadena QA sobre grafo (con intermediate steps) ---
-if _HAS_OLLAMA and llm is not None and graph is not None:
-    chain = GraphCypherQAChain.from_llm(
-        llm=llm,
-        graph=graph,
-        verbose=True,
-        cypher_prompt=cypher_prompt,
-        return_intermediate_steps=True,
-        allow_dangerous_requests=True,
-        # validate_cypher=True,  # opcional
-    )
-else:
-    # Si no hay Ollama disponible, evitamos crear el chain en el import time y
-    # devolvemos mensajes informativos en runtime para que la app no muera con
-    # ModuleNotFoundError al importar el módulo.
-    chain = None
-
+chain = GraphCypherQAChain.from_llm(
+    llm=llm,
+    graph=graph,
+    verbose=True,
+    cypher_prompt=cypher_prompt,
+    return_intermediate_steps=True,
+    allow_dangerous_requests=True,
+    # validate_cypher=True,  # opcional
+)
 
 def _normalize_query_text(q: str) -> str:
     ql = q.lower()
@@ -240,6 +197,15 @@ def _sanitize_cypher(cypher: str, question: str = "") -> str:
             "RETURN DISTINCT e.nombre AS enfermedad"
         )
         return fixed
+    
+     # ===== Caso especial: solo fiebre (sin tos) =====
+    if "fiebre" in qlow and "tos" not in qlow:
+        fixed = (
+            "MATCH (s:Sintoma {nombre:'Fiebre'})-[:INDICA_POTENCIALMENTE]->(e:Enfermedad)\n"
+            "OPTIONAL MATCH (r:Regla)-[:CONDICION]->(s), (r)-[:SUGIERE]->(e)\n"
+            "RETURN e.nombre AS enfermedad, r.codigo AS regla, r.descripcion AS descripcion"
+        )
+        return fixed
 
     # ===== Caso 3: el LLM usó e1/e2 pero retorna e.nombre -> armonizar alias
     if "RETURN" in fixed and " e.nombre" in fixed and "e:" not in fixed:
@@ -301,9 +267,6 @@ def _extract_steps(data: Dict[str, Any]) -> Tuple[str | None, Any]:
 
 def _llm_generate_cypher(question: str) -> str:
     """Llama directamente al generador de Cypher del chain como fallback."""
-    if chain is None:
-        # No se puede generar cypher porque no existe el chain (falta Ollama/langchain_ollama)
-        return "-- ERROR: El generador de Cypher no está disponible porque falta la integración con Ollama. Instalá la dependencia 'langchain_ollama' o la integración correspondiente y reiniciá la app."
     raw = chain.cypher_generation_chain.invoke({"question": question, "query": question})
     text = raw.get("text") if isinstance(raw, dict) and "text" in raw else str(raw)
     return _sanitize_cypher(text, question)
@@ -318,71 +281,61 @@ def _format_answer_from_rows(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return "No se encontraron resultados en el grafo para esa consulta."
 
-    # Intentamos inferir diagnóstico y regla desde las columnas que ya devuelve tu Cypher
-    # columnas típicas: regla, descripcion, enfermedad
-    enf = None
-    regla = None
-    desc = None
+    # Agrupar por enfermedad y acumular reglas/descripciones
+    by_enf: Dict[str, Dict[str, Any]] = {}
     for r in rows:
-        enf = r.get("enfermedad") or enf
-        regla = r.get("regla") or regla
-        desc = r.get("descripcion") or desc
+        enf = r.get("enfermedad")
+        if not enf:
+            continue
+        info = by_enf.setdefault(enf, {"reglas": set(), "descripciones": set()})
+        if r.get("regla"):
+            info["reglas"].add(r["regla"])
+        if r.get("descripcion"):
+            info["descripciones"].add(r["descripcion"])
 
-    # Texto base
-    partes = []
-    if enf:
-        partes.append(f"Posible diagnóstico: **{enf}**.")
-    if desc:
-        partes.append(f"Regla aplicada: _{desc}_ ({regla})." if regla else f"Regla aplicada: _{desc}_.")
+    partes: List[str] = []
 
-    # Buscar recomendaciones en el grafo (si existieran)
+    if by_enf:
+        partes.append("Posibles diagnósticos según el grafo (no reemplaza una consulta médica):")
+        for enf, info in by_enf.items():
+            partes.append(f"- **{enf}**")
+            if info["descripciones"]:
+                for desc in info["descripciones"]:
+                    # buscá el código que vaya con esa descripción si querés
+                    cod = next((c for c in info["reglas"] if c), None)
+                    if cod:
+                        partes.append(f"  • Regla relacionada: _{desc}_ ({cod}).")
+                    else:
+                        partes.append(f"  • Regla relacionada: _{desc}_.")
+
+    # Elegimos una enfermedad principal (la primera) solo para buscar recomendaciones
+    enf_principal = next(iter(by_enf.keys())) if by_enf else None
+
     recomendaciones: List[str] = []
     try:
-        if regla:
-            q1 = (
-                "OPTIONAL MATCH (r:Regla {codigo:$regla})-[:PROPONE]->(rec:Recomendacion) "
-                "RETURN collect(distinct rec.descripcion) AS recs"
-            )
-            rec_rows = graph.query(q1, params={"regla": regla}) or []
-            if rec_rows and rec_rows[0].get("recs"):
-                recomendaciones.extend([x for x in rec_rows[0]["recs"] if x])
-
-        if enf:
+        if enf_principal:
             q2 = (
                 "OPTIONAL MATCH (e:Enfermedad {nombre:$enf})-[:RECOMIENDA]->(rec:Recomendacion) "
                 "RETURN collect(distinct rec.descripcion) AS recs"
             )
-            rec_rows2 = graph.query(q2, params={"enf": enf}) or []
+            rec_rows2 = graph.query(q2, params={"enf": enf_principal}) or []
             if rec_rows2 and rec_rows2[0].get("recs"):
                 recomendaciones.extend([x for x in rec_rows2[0]["recs"] if x])
     except Exception:
         pass
 
-    # Fallback si el grafo aún no tiene esas relaciones
-    if not recomendaciones and enf:
-        fallback = {
-            "Gripe": [
-                "Reposo e hidratación",
-                "Antitérmicos/analgésicos de venta libre si no hay contraindicaciones",
-                "Consultar clínica médica si fiebre alta >48 h o empeora",
-            ],
-            "Alergia Estacional": [
-                "Evitar alérgenos y ventilar hogares fuera de picos de polen",
-                "Lavar fosas nasales con solución salina",
-                "Antihistamínicos según indicación profesional",
-            ],
-        }
-        recomendaciones = fallback.get(enf, [
-            "Reposo relativo y buena hidratación",
-            "Controlar la evolución de los síntomas 24–48 h",
-            "Consultar profesional si aparecen signos de alarma",
-        ])
-
     if recomendaciones:
-        partes.append("Recomendaciones:\n- " + "\n- ".join(recomendaciones))
+        partes.append("\nRecomendaciones generales para este cuadro:")
+        partes.append("- " + "\n- ".join(recomendaciones))
 
-    # Si por algún motivo no pudimos inferir nada, caemos al listado genérico
-    if not partes:
+    # Remate de seguridad
+    partes.append(
+        "\nEsto es solo apoyo educativo basado en un grafo simplificado. "
+        "Ante fiebre alta, síntomas intensos o dudas, consultá a un profesional de la salud o a un servicio de urgencias."
+    )
+
+    # Fallback: si no se llenó nada, mostramos las filas crudas
+    if len(partes) <= 1:
         keys = rows[0].keys()
         listado = []
         for r in rows[:10]:
@@ -392,36 +345,11 @@ def _format_answer_from_rows(rows: List[Dict[str, Any]]) -> str:
 
     return "\n".join(partes)
 
+
 # ===================== Flujo principal =====================
 
 def answer(question: str) -> Tuple[str, str]:
     """Devuelve (cypher_usado, respuesta)"""
-    # 1) Si el chain no fue creado (p. ej. falta langchain_ollama / Ollama), devolvemos
-    # un mensaje instructivo en vez de lanzar un ModuleNotFoundError.
-    if chain is None:
-        msg = (
-            "La integración con Ollama no está disponible en este entorno.\n"
-            "Instalá las dependencias necesarias y reiniciá la app. Comandos sugeridos:\n\n"
-            "# Entorno local (PowerShell)\n"
-            "pip install langchain-ollama ollama langchain streamlit\n\n"
-            "# Si desplegás en Streamlit Cloud, añadí un requirements.txt con esas dependencias.\n\n"
-            "Una vez instaladas, reiniciá la app para que la integración esté activa."
-        )
-        return "", msg
-
-    # Si la inicialización del grafo falló en el import, devolvemos mensaje claro
-    if graph is None and GRAPH_INIT_ERROR is not None:
-        msg = (
-            "No se pudo conectar al servidor de Neo4j en el arranque de la app.\n"
-            f"Error detectado: {GRAPH_INIT_ERROR}\n\n"
-            "Comprobá lo siguiente:\n"
-            "- Que la URL y credenciales de Neo4j (NEO4J_URL/NEO4J_USER/NEO4J_PASSWORD) estén correctas y se definan como secrets en Streamlit Cloud.\n"
-            "- Que el servicio Neo4j permita conexiones desde el host donde corre la app (firewall / reglas de red).\n"
-            "- Que estéis usando el esquema correcto (ej. 'neo4j+s://' para conexiones TCP+TLS a Aura).\n"
-            "Si querés, puedo ayudarte a validar esos valores o a cambiar la app para usar variables de entorno/Streamlit secrets."
-        )
-        return "", msg
-
     # 1) Intento con el chain completo
     try:
         user_q = _normalize_query_text(question)
